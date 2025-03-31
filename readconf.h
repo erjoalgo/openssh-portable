@@ -1,4 +1,4 @@
-/* $OpenBSD: readconf.h,v 1.152 2023/08/28 03:31:16 djm Exp $ */
+/* $OpenBSD: readconf.h,v 1.159 2025/02/15 01:48:30 djm Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -19,7 +19,6 @@
 /* Data structure for representing option data. */
 
 #define SSH_MAX_HOSTS_FILES	32
-#define MAX_CANON_DOMAINS	32
 #define PATH_MAX_SUN		(sizeof((struct sockaddr_un *)0)->sun_path)
 
 struct allowed_cname {
@@ -87,7 +86,7 @@ typedef struct {
 	char   *sk_provider; /* Security key provider */
 	int	verify_host_key_dns;	/* Verify host key using DNS */
 
-	int     num_identity_files;	/* Number of files for RSA/DSA identities. */
+	int     num_identity_files;	/* Number of files for identities. */
 	char   *identity_files[SSH_MAX_IDENTITY_FILES];
 	int    identity_file_userprovided[SSH_MAX_IDENTITY_FILES];
 	struct sshkey *identity_keys[SSH_MAX_IDENTITY_FILES];
@@ -155,12 +154,12 @@ typedef struct {
 	int	proxy_use_fdpass;
 
 	int	num_canonical_domains;
-	char	*canonical_domains[MAX_CANON_DOMAINS];
+	char	**canonical_domains;
 	int	canonicalize_hostname;
 	int	canonicalize_max_dots;
 	int	canonicalize_fallback_local;
 	int	num_permitted_cnames;
-	struct allowed_cname permitted_cnames[MAX_CANON_DOMAINS];
+	struct allowed_cname *permitted_cnames;
 
 	char	*revoked_host_keys;
 
@@ -181,6 +180,11 @@ typedef struct {
 	int	required_rsa_size;	/* minimum size of RSA keys */
 	int	enable_escape_commandline;	/* ~C commandline */
 	int	obscure_keystroke_timing_interval;
+
+	char	**channel_timeouts;	/* inactivity timeout by channel type */
+	u_int	num_channel_timeouts;
+
+	char	*version_addendum;
 
 	char	*ignored_unknown; /* Pattern list of unknown tokens to ignore */
 }       Options;
@@ -230,15 +234,15 @@ typedef struct {
 
 const char *kex_default_pk_alg(void);
 char	*ssh_connection_hash(const char *thishost, const char *host,
-    const char *portstr, const char *user);
+    const char *portstr, const char *user, const char *jump_host);
 void     initialize_options(Options *);
 int      fill_default_options(Options *);
 void	 fill_default_options_for_canonicalization(Options *);
 void	 free_options(Options *o);
 int	 process_config_line(Options *, struct passwd *, const char *,
-    const char *, char *, const char *, int, int *, int);
+    const char *, const char *, char *, const char *, int, int *, int);
 int	 read_config_file(const char *, struct passwd *, const char *,
-    const char *, Options *, int, int *);
+    const char *, const char *, Options *, int, int *);
 int	 parse_forward(struct Forward *, const char *, int, int);
 int	 parse_jump(const char *, Options *, int);
 int	 parse_ssh_uri(const char *, char **, char **, int *);

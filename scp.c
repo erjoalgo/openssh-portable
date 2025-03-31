@@ -1,4 +1,4 @@
-/* $OpenBSD: scp.c,v 1.259 2023/09/10 23:12:32 djm Exp $ */
+/* $OpenBSD: scp.c,v 1.263 2025/03/28 06:04:07 dtucker Exp $ */
 /*
  * scp - secure remote copy.  This is basically patched BSD rcp which
  * uses ssh to do the data transfer (instead of using rcmd).
@@ -222,9 +222,11 @@ suspone(int pid, int signo)
 static void
 suspchild(int signo)
 {
+	int save_errno = errno;
 	suspone(do_cmd_pid, signo);
 	suspone(do_cmd_pid2, signo);
 	kill(getpid(), SIGSTOP);
+	errno = save_errno;
 }
 
 static int
@@ -503,6 +505,7 @@ main(int argc, char **argv)
 	addargs(&args, "-oClearAllForwardings=yes");
 	addargs(&args, "-oRemoteCommand=none");
 	addargs(&args, "-oRequestTTY=no");
+	addargs(&args, "-oControlMaster=no");
 
 	fflag = Tflag = tflag = 0;
 	while ((ch = getopt(argc, argv,
@@ -1083,7 +1086,7 @@ toremote(int argc, char **argv, enum scp_mode_e mode, char *sftp_direct)
 		}
 		if (host && throughlocal) {	/* extended remote to remote */
 			if (mode == MODE_SFTP) {
-				if (remin == -1) {
+				if (remin == -1 || conn == NULL) {
 					/* Connect to dest now */
 					conn = do_sftp_connect(thost, tuser,
 					    tport, sftp_direct,
@@ -1813,8 +1816,16 @@ sink(int argc, char **argv, const char *src)
 				    fnmatch(patterns[n], cp, 0) == 0)
 					break;
 			}
-			if (n >= npatterns)
+			if (n >= npatterns) {
+				debug2_f("incoming filename \"%s\" does not "
+				    "match any of %zu expected patterns", cp,
+				    npatterns);
+				for (n = 0; n < npatterns; n++) {
+					debug3_f("expected pattern %zu: \"%s\"",
+					    n, patterns[n]);
+				}
 				SCREWUP("filename does not match request");
+			}
 		}
 		if (targisdir) {
 			static char *namebuf;

@@ -108,9 +108,19 @@ case "$config" in
 	SKIP_LTESTS=sftp-chroot
 	;;
     gcc-11-Werror)
-	CC="gcc"
+	CC="gcc-11"
 	# -Wnoformat-truncation in gcc 7.3.1 20180130 fails on fmt_scaled
-	CFLAGS="-Wall -Wextra -O2 -Wno-format-truncation -Wimplicit-fallthrough=4 -Wno-unused-parameter"
+	# -Wunused-result ignores (void) so is not useful.  See
+	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=66425
+	CFLAGS="-O2 -Wno-format-truncation -Wimplicit-fallthrough=4 -Wno-unused-parameter -Wno-unused-result"
+	CONFIGFLAGS="--with-pam --with-Werror"
+	;;
+    gcc-12-Werror)
+	CC="gcc-12"
+	# -Wnoformat-truncation in gcc 7.3.1 20180130 fails on fmt_scaled
+	# -Wunused-result ignores (void) so is not useful.  See
+	# https://gcc.gnu.org/bugzilla/show_bug.cgi?id=66425
+	CFLAGS="-O2 -Wno-format-truncation -Wimplicit-fallthrough=4 -Wno-unused-parameter -Wno-unused-result"
 	CONFIGFLAGS="--with-pam --with-Werror"
 	;;
     clang*|gcc*)
@@ -119,6 +129,7 @@ case "$config" in
     kitchensink)
 	CONFIGFLAGS="--with-kerberos5 --with-libedit --with-pam"
 	CONFIGFLAGS="${CONFIGFLAGS} --with-security-key-builtin --with-selinux"
+	CONFIGFLAGS="${CONFIGFLAGS} --with-linux-memlock-onfault"
 	CFLAGS="-DSK_DEBUG -DSANDBOX_SECCOMP_FILTER_DEBUG"
 	;;
     hardenedmalloc)
@@ -126,6 +137,13 @@ case "$config" in
 	;;
     tcmalloc)
 	CONFIGFLAGS="--with-ldflags=-ltcmalloc"
+	# tcmalloc may, depending on the stacktrace generator it uses, create
+	# pipe(2) fds during shared library initialisation. These will later
+	# get clobbered by ssh/sshd calling closefrom() and chaos will ensue.
+	# Tell tcmalloc to use an unwinder that doesn't pull this stuff.
+	TCMALLOC_STACKTRACE_METHOD=generic_fp
+	TEST_SSH_SSHD_ENV="TCMALLOC_STACKTRACE_METHOD=generic_fp"
+	export TCMALLOC_STACKTRACE_METHOD TEST_SSH_SSHD_ENV
 	;;
     krb5|heimdal)
 	CONFIGFLAGS="--with-kerberos5"
@@ -151,8 +169,16 @@ case "$config" in
 	CONFIGFLAGS="--disable-pkcs11"
 	LIBCRYPTOFLAGS="--with-ssl-dir=/opt/boringssl --with-rpath=-Wl,-rpath,"
 	;;
+	aws-lc)
+	LIBCRYPTOFLAGS="--with-ssl-dir=/opt/aws-lc --with-rpath=-Wl,-rpath,"
+	;;
     libressl-*)
 	LIBCRYPTOFLAGS="--with-ssl-dir=/opt/libressl --with-rpath=-Wl,-rpath,"
+	;;
+    putty-*)
+	CONFIGFLAGS="--with-plink=/usr/local/bin/plink --with-puttygen=/usr/local/bin/puttygen"
+	# We don't need to rerun the regular tests, just the interop ones.
+	TEST_TARGET=interop-tests
 	;;
     openssl-*)
 	LIBCRYPTOFLAGS="--with-ssl-dir=/opt/openssl --with-rpath=-Wl,-rpath,"
@@ -166,13 +192,13 @@ case "$config" in
 	CONFIGFLAGS="--with-selinux"
 	;;
     sk)
-	CONFIGFLAGS="--with-security-key-builtin"
+	CONFIGFLAGS="--with-security-key-builtin --with-security-key-standalone"
         ;;
     without-openssl)
 	LIBCRYPTOFLAGS="--without-openssl"
 	TEST_TARGET=t-exec
 	;;
-    valgrind-[1-5]|valgrind-unit)
+    valgrind-[1-4]|valgrind-unit)
 	# rlimit sandbox and FORTIFY_SOURCE confuse Valgrind.
 	CONFIGFLAGS="--without-sandbox --without-hardening"
 	CONFIGFLAGS="$CONFIGFLAGS --with-cppflags=-D_FORTIFY_SOURCE=0"
@@ -182,10 +208,9 @@ case "$config" in
 	# Valgrind slows things down enough that the agent timeout test
 	# won't reliably pass, and the unit tests run longer than allowed
 	# by github so split into separate tests.
-	tests2="integrity try-ciphers"
+	tests2="integrity try-ciphers rekey"
 	tests3="krl forward-control sshsig agent-restrict kextype sftp"
 	tests4="cert-userkey cert-hostkey kextype sftp-perm keygen-comment percent"
-	tests5="rekey"
 	case "$config" in
 	    valgrind-1)
 		# All tests except agent-timeout (which is flaky under valgrind),
@@ -193,6 +218,7 @@ case "$config" in
 		# and hostbased (since valgrind won't let ssh exec keysign).
 		# Slow ones are run separately to increase parallelism.
 		SKIP_LTESTS="agent-timeout connection-timeout hostbased"
+		SKIP_LTESTS="$SKIP_LTESTS penalty-expire"
 		SKIP_LTESTS="$SKIP_LTESTS ${tests2} ${tests3} ${tests4} ${tests5}"
 		;;
 	    valgrind-2)
@@ -203,9 +229,6 @@ case "$config" in
 		;;
 	    valgrind-4)
 		LTESTS="${tests4}"
-		;;
-	    valgrind-5)
-		LTESTS="${tests5}"
 		;;
 	    valgrind-unit)
 		TEST_TARGET="unit USE_VALGRIND=1"
@@ -254,25 +277,31 @@ case "${TARGET_HOST}" in
 	# Native linker is not great with PIC so OpenSSL is built w/out.
 	CONFIGFLAGS="${CONFIGFLAGS} --disable-security-key"
 	;;
+    fbsd14-ppc64)
+	# Disable security key tests for bigendian interop test.
+	CONFIGFLAGS="${CONFIGFLAGS} --disable-security-key"
+	;;
     hurd)
 	SKIP_LTESTS="forwarding multiplex proxy-connect hostkey-agent agent-ptrace"
 	;;
     minix3)
 	CONFIGFLAGS="${CONFIGFLAGS} --disable-security-key"
+	# Unix domain sockets don't work quite like we expect, so also
+	# disable FD passing (and thus multiplexing).
+	CONFIGFLAGS="${CONFIGFLAGS} --disable-fd-passing"
 	LIBCRYPTOFLAGS="--without-openssl"
+
 	# Minix does not have a loopback interface so we have to skip any
 	# test that relies on one.
 	# Also, Minix seems to be very limited in the number of select()
 	# calls that can be operating concurrently, so prune additional tests for that.
 	T="addrmatch agent-restrict brokenkeys cfgmatch cfgmatchlisten cfgparse
-	    connect connect-uri exit-status forwarding hostkey-agent
-	    key-options keyscan knownhosts-command login-timeout
+	    connect connect-uri dynamic-forward exit-status forwarding
+	    forward-control
+	    hostkey-agent key-options keyscan knownhosts-command login-timeout
 	    reconfigure reexec rekey scp scp-uri scp3 sftp sftp-badcmds
 	    sftp-batch sftp-cmds sftp-glob sftp-perm sftp-uri stderr-data
-	    transfer"
-	# Unix domain sockets don't work quite like we expect, so also skip any tests
-	# that use multiplexing.
-	T="$T connection-timeout dynamic-forward forward-control multiplex"
+	    transfer penalty penalty-expire"
 	SKIP_LTESTS="$(echo $T)"
 	TEST_TARGET=t-exec
 	SUDO=""
@@ -282,8 +311,20 @@ case "${TARGET_HOST}" in
 	# SHA256 functions in sha2.h conflict with OpenSSL's breaking sk-dummy
 	CONFIGFLAGS="${CONFIGFLAGS} --without-hardening --disable-security-key"
 	;;
+    openwrt-mipsel)
+	# Test most of the flags that OpenWRT sets for their package build.
+	# We only do this on one OpenWRT target for better coverage.
+	# The installed shared libraries installed by default are stripped and
+	# can't be linked to on the target systems.
+	OPENWRT_FLAGS="--disable-strip --disable-lastlog
+	   --disable-utmp --disable-utmpx --disable-wtmp --disable-wtmpx
+	   --with-stackprotect --with-cflags-after=-fzero-call-used-regs=skip"
+	CONFIGFLAGS="${CONFIGFLAGS} $(echo ${OPENWRT_FLAGS}) --without-zlib --disable-security-key"
+	LIBCRYPTOFLAGS="--without-openssl"
+	TEST_TARGET="t-exec"
+	;;
     openwrt-*)
-	CONFIGFLAGS="${CONFIGFLAGS} --without-zlib"
+	CONFIGFLAGS="${CONFIGFLAGS} --without-zlib --disable-security-key"
 	LIBCRYPTOFLAGS="--without-openssl"
 	TEST_TARGET="t-exec"
 	;;
@@ -310,6 +351,10 @@ case "$host" in
 	# modern versions don't ship with libcrypto.
 	LIBCRYPTOFLAGS="--without-openssl"
 	TEST_TARGET=t-exec
+
+	# On some OS X runners we can't write to /var/empty.
+	CONFIGFLAGS="${CONFIGFLAGS} --with-privsep-path=/usr/local/empty"
+
 	case "$host" in
 	*-darwin22.*)
 		# sudo -S nobody doesn't work on macos 13 for some reason.
